@@ -35,7 +35,7 @@ async fn notif_torrent_added(dispatcher: &Dispatcher, torrent_name: &String) {
 async fn torrents_get(client: &mut TransClient) -> Result<Vec<Torrent>> {
     let torrents = client
         .torrent_get(
-            Some(vec![TorrentGetField::Name, TorrentGetField::IsFinished]),
+            Some(vec![TorrentGetField::Name, TorrentGetField::PercentDone]),
             None,
         )
         .await?;
@@ -92,9 +92,12 @@ async fn main() -> Result<()> {
 
         let status: Vec<TorrentStatus> = torrents
             .iter()
-            .map(|it| TorrentStatus {
-                name: it.name.clone().unwrap(),
-                is_finished: it.is_finished.unwrap(),
+            .map(|it| {
+                let done = it.percent_done.unwrap() == 1.0;
+                TorrentStatus {
+                    name: it.name.clone().unwrap(),
+                    is_finished: done,
+                }
             })
             .collect();
 
