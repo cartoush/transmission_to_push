@@ -2,11 +2,21 @@ extern crate transmission_rpc;
 
 use log::{debug, error, info};
 use ntfy::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::time::Duration;
 use std::{env, thread};
 use transmission_rpc::types::{BasicAuth, Result, Torrent, TorrentGetField};
 use transmission_rpc::TransClient;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TorrentStatus {
+    name: String,
+    is_finished: bool,
+}
 
 async fn notif_torrent_finished(dispatcher: &Dispatcher, torrent_name: &String) {
     let notif = Payload::new("transmission")
@@ -38,6 +48,8 @@ async fn torrents_get(client: &mut TransClient) -> Result<Vec<Torrent>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+
     let mut client;
     let url = env::var("TURL")?;
     if let (Ok(user), Ok(password)) = (env::var("TUSER"), env::var("TPWD")) {
@@ -45,14 +57,27 @@ async fn main() -> Result<()> {
     } else {
         client = TransClient::new(url.parse()?);
     }
-    let mut duration;
+    let mut duration = Duration::from_secs(0);
 
     let dispatcher = Dispatcher::builder(env::var("NURL")?)
         .credentials(Auth::new(env::var("NUSER")?, env::var("NPWD")?)) // Add optional credentials
         .build()?; // Build dispatcher
 
     let mut old_torrents: HashMap<String, bool> = HashMap::new();
+    if Path::new("cache.cbor").exists() {
+        let cache_file = File::open("cache.cbor")?;
+        let reader = BufReader::new(cache_file);
+        let cached: Vec<TorrentStatus> = serde_cbor::from_reader(reader).unwrap();
+
+        for i in cached {
+            old_torrents.insert(i.name, i.is_finished);
+        }
+    }
+
     loop {
+        thread::sleep(duration);
+        debug!("Old torrents: {:?}", old_torrents);
+
         let torrents = match torrents_get(&mut client).await {
             Ok(torr) => {
                 duration = Duration::from_secs(60);
@@ -65,26 +90,36 @@ async fn main() -> Result<()> {
             }
         };
 
-        let status: Vec<(String, bool)> = torrents
+        let status: Vec<TorrentStatus> = torrents
             .iter()
-            .map(|it| (it.name.clone().unwrap(), it.is_finished.unwrap()))
+            .map(|it| TorrentStatus {
+                name: it.name.clone().unwrap(),
+                is_finished: it.is_finished.unwrap(),
+            })
             .collect();
-        debug!("{:#?}", status);
 
         for i in &status {
-            if old_torrents.contains_key(&i.0) {
-                if i.1 && !old_torrents[&i.0] {
-                    notif_torrent_finished(&dispatcher, &i.0).await;
-                    info!("Torrent finished: {}", &i.0);
+            debug!("{} {}", i.name, i.is_finished);
+
+            if old_torrents.contains_key(&i.name) {
+                if i.is_finished && !old_torrents[&i.name] {
+                    notif_torrent_finished(&dispatcher, &i.name).await;
+                    info!("Torrent finished: {}", &i.name);
                 }
-            } else {
-                notif_torrent_added(&dispatcher, &i.0).await;
+            } else if !i.is_finished {
+                notif_torrent_added(&dispatcher, &i.name).await;
+                info!("Torrent added: {}", &i.name);
             }
         }
 
-        let _ = status
+        {
+            let cache_file = File::create("cache.cbor")?;
+            let writer = BufWriter::new(cache_file);
+            serde_cbor::to_writer(writer, &status).unwrap();
+        }
+        old_torrents = status
             .into_iter()
-            .map(|torr| old_torrents.insert(torr.0, torr.1));
-        thread::sleep(duration);
+            .map(|torr| (torr.name, torr.is_finished))
+            .collect::<HashMap<String, bool>>();
     }
 }
