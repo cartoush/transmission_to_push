@@ -1,5 +1,6 @@
 extern crate transmission_rpc;
 
+use ntfy::*;
 use std::env;
 use transmission_rpc::types::{BasicAuth, Result, TorrentGetField};
 use transmission_rpc::TransClient;
@@ -27,6 +28,19 @@ async fn main() -> Result<()> {
         .map(|it| (it.name.clone().unwrap(), it.is_finished.unwrap()))
         .collect();
     println!("{:#?}", status);
+
+    let dispatcher = Dispatcher::builder(env::var("NURL")?)
+        .credentials(Auth::new(env::var("NUSER")?, env::var("NPWD")?)) // Add optional credentials
+        .build()?; // Build dispatcher
+
+    let payload = Payload::new("mytopic")
+        .message("Hello, **World**!") // Add optional message
+        .title("Alert") // Add optional title
+        .priority(Priority::High) // Edit priority
+        .click(Url::parse("https://transmission.pennarbed.eu")?) // Add optional clickable url
+        .markdown(true); // Use markdown
+
+    dispatcher.send(&payload).await.unwrap();
 
     Ok(())
 }
