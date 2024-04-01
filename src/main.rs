@@ -1,9 +1,40 @@
 extern crate transmission_rpc;
 
+use log::{debug, error, info};
 use ntfy::*;
-use std::env;
-use transmission_rpc::types::{BasicAuth, Result, TorrentGetField};
+use std::collections::HashMap;
+use std::time::Duration;
+use std::{env, thread};
+use transmission_rpc::types::{BasicAuth, Result, Torrent, TorrentGetField};
 use transmission_rpc::TransClient;
+
+async fn notif_torrent_finished(dispatcher: &Dispatcher, torrent_name: &String) {
+    let notif = Payload::new("transmission")
+        .message(format!("{} download complete", torrent_name))
+        .title("Transmission");
+    dispatcher.send(&notif).await.unwrap();
+}
+
+async fn notif_torrent_added(dispatcher: &Dispatcher, torrent_name: &String) {
+    let notif = Payload::new("transmission")
+        .message(format!("{} download started", torrent_name))
+        .title("Transmission");
+    dispatcher.send(&notif).await.unwrap();
+}
+
+async fn torrents_get(client: &mut TransClient) -> Result<Vec<Torrent>> {
+    let torrents = client
+        .torrent_get(
+            Some(vec![TorrentGetField::Name, TorrentGetField::IsFinished]),
+            None,
+        )
+        .await?;
+
+    match torrents.is_ok() {
+        true => Ok(torrents.arguments.torrents),
+        false => Err("failed getting torrents".into()),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,33 +45,46 @@ async fn main() -> Result<()> {
     } else {
         client = TransClient::new(url.parse()?);
     }
-
-    let res = client
-        .torrent_get(
-            Some(vec![TorrentGetField::Name, TorrentGetField::IsFinished]),
-            None,
-        )
-        .await?;
-    let status: Vec<(String, bool)> = res
-        .arguments
-        .torrents
-        .iter()
-        .map(|it| (it.name.clone().unwrap(), it.is_finished.unwrap()))
-        .collect();
-    println!("{:#?}", status);
+    let mut duration;
 
     let dispatcher = Dispatcher::builder(env::var("NURL")?)
         .credentials(Auth::new(env::var("NUSER")?, env::var("NPWD")?)) // Add optional credentials
         .build()?; // Build dispatcher
 
-    let payload = Payload::new("mytopic")
-        .message("Hello, **World**!") // Add optional message
-        .title("Alert") // Add optional title
-        .priority(Priority::High) // Edit priority
-        .click(Url::parse("https://transmission.pennarbed.eu")?) // Add optional clickable url
-        .markdown(true); // Use markdown
+    let mut old_torrents: HashMap<String, bool> = HashMap::new();
+    loop {
+        let torrents = match torrents_get(&mut client).await {
+            Ok(torr) => {
+                duration = Duration::from_secs(60);
+                torr
+            }
+            Err(e) => {
+                duration = Duration::from_secs(60 * 5);
+                error!("Error : {:?}, setting interval to 300 seconds", e);
+                vec![]
+            }
+        };
 
-    dispatcher.send(&payload).await.unwrap();
+        let status: Vec<(String, bool)> = torrents
+            .iter()
+            .map(|it| (it.name.clone().unwrap(), it.is_finished.unwrap()))
+            .collect();
+        debug!("{:#?}", status);
 
-    Ok(())
+        for i in &status {
+            if old_torrents.contains_key(&i.0) {
+                if i.1 && !old_torrents[&i.0] {
+                    notif_torrent_finished(&dispatcher, &i.0).await;
+                    info!("Torrent finished: {}", &i.0);
+                }
+            } else {
+                notif_torrent_added(&dispatcher, &i.0).await;
+            }
+        }
+
+        let _ = status
+            .into_iter()
+            .map(|torr| old_torrents.insert(torr.0, torr.1));
+        thread::sleep(duration);
+    }
 }
